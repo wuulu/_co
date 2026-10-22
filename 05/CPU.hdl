@@ -7,31 +7,14 @@
  * The Hack CPU (Central Processing unit), consisting of an ALU,
  * two registers named A and D, and a program counter named PC.
  * The CPU is designed to fetch and execute instructions written in 
- * the Hack machine language. In particular, functions as follows:
- * Executes the inputted instruction according to the Hack machine 
- * language specification. The D and A in the language specification
- * refer to CPU-resident registers, while M refers to the external
- * memory location addressed by A, i.e. to Memory[A]. The inM input 
- * holds the value of this location. If the current instruction needs 
- * to write a value to M, the value is placed in outM, the address 
- * of the target location is placed in the addressM output, and the 
- * writeM control bit is asserted. (When writeM==0, any value may 
- * appear in outM). The outM and writeM outputs are combinational: 
- * they are affected instantaneously by the execution of the current 
- * instruction. The addressM and pc outputs are clocked: although they 
- * are affected by the execution of the current instruction, they commit 
- * to their new values only in the next time step. If reset==1 then the 
- * CPU jumps to address 0 (i.e. pc is set to 0 in next time step) rather 
- * than to the address resulting from executing the current instruction. 
+ * the Hack machine language.
  */
 
 CHIP CPU {
 
     IN  inM[16],         // M value input  (M = contents of RAM[A])
         instruction[16], // Instruction for execution
-        reset;           // Signals whether to re-start the current
-                         // program (reset==1) or continue executing
-                         // the current program (reset==0).
+        reset;           // Signals whether to re-start the current program (reset==1)
 
     OUT outM[16],        // M value output
         writeM,          // Write to M? 
@@ -39,5 +22,79 @@ CHIP CPU {
         pc[15];          // address of next instruction
 
     PARTS:
-    // Put your code here:
+    // -----------------------------------------------------------------
+    // Instruction Decoding
+    // -----------------------------------------------------------------
+    // instruction[15] == 0  -> A-instruction
+    // instruction[15] == 1  -> C-instruction
+    Not(in=instruction[15], out=isAInstruction);
+    Not(in=isAInstruction, out=isCInstruction);
+
+    // -----------------------------------------------------------------
+    // A-Register Mux & Load Control
+    // -----------------------------------------------------------------
+    // Route ALU output or instruction into A-Register based on instruction type
+    Mux16(a=instruction, b=aluOut, sel=isCInstruction, out=aRegInput);
+
+    // A Register updates if:
+    // 1) It's an A-instruction (isAInstruction = 1)
+    // 2) It's a C-instruction and instruction[5] (d1 destination bit) is set
+    Or(a=isAInstruction, b=instruction[5], out=loadA);
+    ARegister(in=aRegInput, load=loadA, out=aRegOut, out[0..14]=addressM);
+
+    // -----------------------------------------------------------------
+    // D-Register Load Control
+    // -----------------------------------------------------------------
+    // D Register updates only during a C-instruction if instruction[4] (d2 bit) is set
+    And(a=isCInstruction, b=instruction[4], out=loadD);
+    DRegister(in=aluOut, load=loadD, out=dRegOut);
+
+    // -----------------------------------------------------------------
+    // ALU Input Selection & Computation
+    // -----------------------------------------------------------------
+    // Select between A-register value or inM input based on instruction[12] ('a' bit)
+    Mux16(a=aRegOut, b=inM, sel=instruction[12], out=aluYInput);
+
+    ALU(
+        x=dRegOut, 
+        y=aluYInput, 
+        zx=instruction[11], 
+        nx=instruction[10], 
+        zy=instruction[9], 
+        ny=instruction[8], 
+        f=instruction[7], 
+        no=instruction[6], 
+        out=aluOut, 
+        out=outM, 
+        zr=zrOut, 
+        ng=ngOut
+    );
+
+    // -----------------------------------------------------------------
+    // Memory Write Control (writeM)
+    // -----------------------------------------------------------------
+    // writeM is active only during a C-instruction if instruction[3] (d3 bit) is set
+    And(a=isCInstruction, b=instruction[3], out=writeM);
+
+    // -----------------------------------------------------------------
+    // Program Counter (PC) Logic
+    // -----------------------------------------------------------------
+    // Evaluate output status: positive condition (not zero and not negative)
+    Or(a=zrOut, b=ngOut, out=zrOrNg);
+    Not(in=zrOrNg, out=posOut);
+
+    // Evaluate jump conditions based on j1 (jgt), j2 (jeq), j3 (jlt) bits
+    And(a=instruction[0], b=posOut, out=jgt); // j3 & pos
+    And(a=instruction[1], b=zrOut,  out=jeq); // j2 & zr
+    And(a=instruction[2], b=ngOut,  out=jlt); // j1 & ng
+
+    // Combine jump evaluation
+    Or(a=jgt, b=jeq, out=jge);
+    Or(a=jge, b=jlt, out=jumpCondition);
+
+    // Jump only executes if it is a C-instruction
+    And(a=isCInstruction, b=jumpCondition, out=pcLoad);
+
+    // PC updates: load=pcLoad, inc=true, reset=reset
+    PC(in=aRegOut, load=pcLoad, inc=true, reset=reset, out[0..14]=pc);
 }
